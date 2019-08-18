@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import dsa
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import *
+import binascii as ba
+import socketserver
+import sys
+import os
+
+def generate_shared_key():
+	return rsa.generate_private_key(65537,2048,default_backend()).public_key().public_bytes(Encoding.PEM,PublicFormat.SubjectPublicKeyInfo)
+
+def generate_rsa_prvkey():
+	return rsa.generate_private_key(65537,2048,default_backend())
+
+def generate_rsa_pubkey(private_key):
+	return private_key.public_key()
+
+def signing(private_key,message):
+	return private_key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256())
+
+def signature_verification(public_key,signature,message):
+	if public_key.verify(signature,message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256()) == None:
+		return True
+	else:
+		return False
+
+def encrypt_data(public_key,message):
+	return public_key.encrypt(message,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+
+def decrypt_data(private_key,ciphertext):
+	return private_key.decrypt(ciphertext,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+
+
+
+class server_handler(socketserver.BaseRequestHandler):
+	def __init__(self, request, client_address, server):
+		self.private_key = generate_rsa_prvkey()
+		self.state = 0
+		socketserver.BaseRequestHandler.__init__(self, request, client_address, server)
+
+	def handle(self):
+		self.data = self.request.recv(3072).strip()
+		if self.state == 0 and self.data == b'Hello':
+			self.state = 1
+			print(self.data, self.state)
+			response = b'Hey There'
+			self.request.sendall(response)
+		else:
+			response = b'Wrong Message'
+			self.request.sendall(response)
+			return
+		self.data = self.request.recv(3072).strip()
+		if self.state == 1 and self.data == b'Public Key?':
+			self.state = 2
+			print(self.data, self.state)
+			public_key = generate_rsa_pubkey(self.private_key).public_bytes(Encoding.PEM,PublicFormat.SubjectPublicKeyInfo)
+			response = b'Server public key:' + public_key
+			self.request.sendall(response)
+		else:
+			response = b'I do not understand you'
+			self.request.sendall(response)
+			return
+		self.data = self.request.recv(3072).strip()
+		if self.state == 2 and bytearray(self.data)[0:18] == b'Client public key:':
+			client_pubkey = load_pem_public_key(bytes(bytearray(self.data)[18:]), default_backend())
+			#print(client_pubkey)	
+			shared_key = generate_shared_key()
+			#shared_key_client = encrypt_data(client_pubkey,shared_key)
+			#print(len(shared_key))
+			#print("\n\n\n")
+			#signature = signing(self.private_key,shared_key)
+			response = b'Shared Key:'+ shared_key
+			self.request.sendall(response)
+		
+		self.data = self.request.recv(3072).strip()
+		print(self.data)
+		if bytearray(self.data) == b'Initiation Process Complete':
+			while(True):
+				self.data = self.request.recv(3072).strip()
+				response = b'Ciphertext Received'
+				self.request.sendall(response)
+				print(self.data)
+				if bytearray(self.data)[0:8] == b'Request:':
+					ciphertext = bytes(bytearray(self.data)[8:])
+					#ciphertext = ciphertext.decode("utf-8")
+					plaintext = decrypt_data(self.private_key,ciphertext)
+					print(plaintext)
+					if plaintext == b'list':
+						directory = os.listdir("/root/ftp/")
+						directory = bytes('\n'.join(directory),'utf-8')
+						ciphertext = encrypt_data(client_pubkey,directory)
+						signature_server = signing(self.private_key,directory)
+						self.data = self.request.recv(3072).strip()
+						if bytearray(self.data)[0:10] == b'Signature:':
+							signature = bytes(bytearray(self.data)[10:])
+							if signature_verification(client_pubkey,signature,plaintext):
+								response = b'Response:' + ciphertext
+								self.request.sendall(response)
+								self.data = self.request.recv(3072).strip()
+								print(self.data)
+								response = b'Signature:' + signature_server
+								self.request.sendall(response)
+							else:
+								response = b"Response:can't verify the sender"
+								self.request.sendall(response)
+					else:
+						pass
+				else:
+					break
+
+			#response = b'Signature:' + signature
+			#self.request.sendall(response)
+			self.state = 0
+			return
+
+def main():
+	host, port = '', 7777
+	server_side = socketserver.TCPServer((host, port), server_handler)
+	try:
+		server_side.serve_forever()
+	except KeyboardInterrupt:
+		server_side.shutdown(0)
+		sys.exit(0)
+
+main()
+
