@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+
+from cryptography.hazmat.primitives.serialization import *
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
+import binascii as ba
+import socketserver
+import socket
+
+def generate_rsa_prvkey():
+	return rsa.generate_private_key(65537,2048,default_backend())
+
+def generate_rsa_pubkey(private_key):
+	return private_key.public_key()
+        
+def signing(private_key,message):
+	return private_key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256())
+
+def signature_verification(public_key,signature,message):
+        if public_key.verify(signature,message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256()) == None:
+                return True
+        else:
+                return False
+
+def encrypt_data(public_key,message):
+        return public_key.encrypt(message,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+
+def decrypt_data(private_key,ciphertext):
+        return private_key.decrypt(ciphertext,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+		
+
+def main():
+	host, port = '10.11.1.10',7777
+	sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	sock.connect((host,port))
+	request = b'Hello'
+	sock.sendall(request)
+	received = sock.recv(3072).strip()
+	print('Received:\n{}'.format(received))
+	if received == b'Hey There':
+		request = b'Public Key?'
+		sock.sendall(request)
+	else:
+		print('Bad Response')
+		sock.close()
+		return
+
+	received = sock.recv(3072).strip()
+	if bytearray(received)[0:18] == b'Server public key:':
+		server_public_key = load_pem_public_key(bytes(bytearray(received)[18:]), default_backend())
+		print('ReceivedL\n{}'.format(received))
+		print(server_public_key)
+		private_key = generate_rsa_prvkey()
+		public_key = generate_rsa_pubkey(private_key)		
+		request = b'Client public key:' + public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+		sock.sendall(request)
+	else:
+		print('Bad Response')
+		sock.close()
+		return
+	
+	received = sock.recv(3072).strip()
+	#print('Received:\n{}'.format(received))
+	if bytearray(received)[0:11] == b'Shared Key:':
+		shared_key = bytes(bytearray(received)[11:])
+		response = b'Initiation Process Complete'
+		sock.sendall(response)
+		while(True):
+			print("Menu:\n1. List Directory\n2. Upload File\n3. Download File")
+			menu_input = input("Enter your choice:")
+			if menu_input == "1":
+				msg = b'list'
+				ciphertext = encrypt_data(server_public_key,msg)
+				signature = signing(private_key,msg)
+				
+				response = b'Request:' + ciphertext
+				sock.sendall(response)
+				received = sock.recv(3072).strip()
+				print(received)
+				response = b'Signature:' + signature
+				sock.sendall(response)
+				received = sock.recv(3072).strip()
+				print(received)
+				response = b'Ciphertext Received'
+				sock.sendall(response)
+				if bytearray(received)[0:9] == b'Response:':
+					ciphertext = bytes(bytearray(received)[9:])
+					#ciphertext = ciphertext.decode("utf-8")
+					plaintext = decrypt_data(private_key,ciphertext)
+			
+				received = sock.recv(3072).strip()
+				print(received)
+				print(plaintext)
+				if bytearray(received)[0:10] == b'Signature:':
+					signature = bytes(bytearray(received)[10:])
+					if signature_verification(server_public_key,signature,plaintext):
+						print(plaintext.decode('utf-8'))
+					else:
+						print("can't verify the sender")
+			else:
+				break						
+	
+	
+	#received = sock.recv(3072).strip()
+	#print('Received:\n{}'.format(received))
+	#if bytearray(received)[0:10] == b'Signature:':
+		#signature = bytes(bytearray(received)[10:])
+		#print(signature)
+	#if signature_verification(server_public_key,signature,shared_key):
+#		shared_key = decrypt_data(private_key,shared_key)
+		#print(shared_key)
+	#else:
+		#print("can't verify the sender")	
+	sock.close()
+	return
+
+main()
